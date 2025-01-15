@@ -8,6 +8,7 @@ use limit::Limit;
 use crate::{
     event::Event,
     input::Input,
+    Edition,
     SyntaxKind::{self, EOF, ERROR, TOMBSTONE},
     TokenSet, T,
 };
@@ -26,13 +27,14 @@ pub(crate) struct Parser<'t> {
     pos: usize,
     events: Vec<Event>,
     steps: Cell<u32>,
+    edition: Edition,
 }
 
 static PARSER_STEP_LIMIT: Limit = Limit::new(15_000_000);
 
 impl<'t> Parser<'t> {
-    pub(super) fn new(inp: &'t Input) -> Parser<'t> {
-        Parser { inp, pos: 0, events: Vec::new(), steps: Cell::new(0) }
+    pub(super) fn new(inp: &'t Input, edition: Edition) -> Parser<'t> {
+        Parser { inp, pos: 0, events: Vec::new(), steps: Cell::new(0), edition }
     }
 
     pub(crate) fn finish(self) -> Vec<Event> {
@@ -129,6 +131,14 @@ impl<'t> Parser<'t> {
         true
     }
 
+    pub(crate) fn eat_contextual_kw(&mut self, kind: SyntaxKind) -> bool {
+        if !self.at_contextual_kw(kind) {
+            return false;
+        }
+        self.bump_remap(kind);
+        true
+    }
+
     fn at_composite2(&self, n: usize, k1: SyntaxKind, k2: SyntaxKind) -> bool {
         self.inp.kind(self.pos + n) == k1
             && self.inp.kind(self.pos + n + 1) == k2
@@ -205,7 +215,7 @@ impl<'t> Parser<'t> {
             marker.bomb.defuse();
             marker = new_marker;
         };
-        self.pos += 1 as usize;
+        self.pos += 1;
         self.push_event(Event::FloatSplitHack { ends_in_dot });
         (ends_in_dot, marker)
     }
@@ -248,25 +258,25 @@ impl<'t> Parser<'t> {
         self.err_recover(message, TokenSet::EMPTY);
     }
 
-    /// Create an error node and consume the next token.
-    pub(crate) fn err_recover(&mut self, message: &str, recovery: TokenSet) {
-        match self.current() {
-            T!['{'] | T!['}'] => {
-                self.error(message);
-                return;
-            }
-            _ => (),
+    /// Create an error node and consume the next token unless it is in the recovery set.
+    ///
+    /// Returns true if recovery kicked in.
+    pub(crate) fn err_recover(&mut self, message: &str, recovery: TokenSet) -> bool {
+        if matches!(self.current(), T!['{'] | T!['}']) {
+            self.error(message);
+            return true;
         }
 
         if self.at_ts(recovery) {
             self.error(message);
-            return;
+            return true;
         }
 
         let m = self.start();
         self.error(message);
         self.bump_any();
         m.complete(self, ERROR);
+        false
     }
 
     fn do_bump(&mut self, kind: SyntaxKind, n_raw_tokens: u8) {
@@ -277,6 +287,10 @@ impl<'t> Parser<'t> {
 
     fn push_event(&mut self, event: Event) {
         self.events.push(event);
+    }
+
+    pub(crate) fn edition(&self) -> Edition {
+        self.edition
     }
 }
 
@@ -313,10 +327,10 @@ impl Marker {
         self.bomb.defuse();
         let idx = self.pos as usize;
         if idx == p.events.len() - 1 {
-            match p.events.pop() {
-                Some(Event::Start { kind: TOMBSTONE, forward_parent: None }) => (),
-                _ => unreachable!(),
-            }
+            assert!(matches!(
+                p.events.pop(),
+                Some(Event::Start { kind: TOMBSTONE, forward_parent: None })
+            ));
         }
     }
 }
